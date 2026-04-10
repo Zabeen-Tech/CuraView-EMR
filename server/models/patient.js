@@ -24,16 +24,45 @@ const PatientSchema = new mongoose.Schema({
     type: String, 
     default: "" 
   },
-
-  // --- 📅 BOOKING & QUEUE WORKFLOW ---
-  // Keeps your "Pending" queue working for the external registration link
-  bookingStatus: { 
-    type: String, 
-    enum: ["None", "Pending", "Accepted", "Cancelled", "Doctor Busy", "Doctor Not Available"], 
-    default: "Accepted" 
+  
+  // ALIAS: Ensuring compatibility between Admin (assignedDoctor) and Patient (doctor) views
+  doctor: {
+    type: String,
+    default: ""
   },
 
-  // Core workflow status
+  // --- 📅 BOOKING & QUEUE WORKFLOW ---
+  // Updated to be the "Source of Truth" for all dashboards
+  bookingStatus: { 
+    type: String, 
+    enum: [
+      "None", 
+      "Pending", 
+      "Accepted", 
+      "Cancelled", 
+      "Rejected", 
+      "Doctor Busy", 
+      "Doctor Not Available", 
+      "In-Consultation", 
+      "Discharged" 
+    ], 
+    default: "None" 
+  },
+
+  // UPDATED: Crucial for the "Patients Ahead" number to work
+  // Logic Tip: When fetching, sort by 'updatedAt' where bookingStatus: "Accepted"
+  queuePosition: { 
+    type: Number, 
+    default: 0 
+  },
+
+  // ADDED: Calculated as (queuePosition - 1) * 15
+  estimatedWaitTime: {
+    type: Number,
+    default: 0
+  },
+
+  // Core workflow status - SYNCED with bookingStatus for logic consistency
   status: { 
     type: String, 
     enum: ["Requested", "Waiting", "In-Consultation", "Discharged"], 
@@ -60,7 +89,6 @@ const PatientSchema = new mongoose.Schema({
 
   // --- HISTORY (Preserved for Re-appointments) ---
   // UPDATED: Renamed to visitHistory to match your Doctor Dashboard frontend logic
-  // Added medications field so Rx saves correctly
   visitHistory: [
     {
       date: { type: String, default: () => new Date().toLocaleDateString() },
@@ -76,7 +104,7 @@ const PatientSchema = new mongoose.Schema({
   // Kept 'history' as an alias so existing data doesn't break
   history: { type: Array, default: [] } 
 }, { 
-  timestamps: true 
+  timestamps: true // CRITICAL: Used to calculate queue order by "Accepted" time
 });
 
 module.exports = mongoose.model('Patient', PatientSchema);
