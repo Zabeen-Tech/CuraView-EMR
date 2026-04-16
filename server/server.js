@@ -8,6 +8,9 @@ const { Server } = require('socket.io');
 // --- MODELS ---
 const User = require('./models/user');
 const Patient = require('./models/patient');
+const Invoice = require('./models/invoice'); 
+const Service = require('./models/service'); 
+const Settings = require('./models/settings'); // NEW: For Clinic Profile info
 
 const app = express();
 const server = http.createServer(app); 
@@ -94,7 +97,6 @@ app.get('/api/patients/:id', async (req, res) => {
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// FIXED: Added back the specific status update route for the dropdowns
 app.put('/api/patients/:id/status', async (req, res) => {
     try {
         const { status } = req.body;
@@ -174,7 +176,7 @@ app.put('/api/patients/:id', async (req, res) => {
 
 app.put('/api/patients/:id/respond-appointment', async (req, res) => {
     try {
-        const { decision, adminNotes } = req.body;
+        const { decision, adminNotes, queuePosition, roomNumber, appointmentTime } = req.body;
         const current = await Patient.findById(req.params.id);
         
         let queuePos = 0;
@@ -188,6 +190,8 @@ app.put('/api/patients/:id/respond-appointment', async (req, res) => {
                 bookingStatus: decision, 
                 adminNotes: adminNotes || "", 
                 queuePosition: queuePos,
+                roomNumber: roomNumber || current.roomNumber,
+                appointmentTime: appointmentTime || current.appointmentTime,
                 status: decision === 'Accepted' ? 'Waiting' : 'Discharged'
             } 
         }, { new: true });
@@ -230,6 +234,96 @@ app.get('/api/doctors', async (req, res) => {
     try {
         const doctors = await User.find({ role: 'doctor' });
         res.json(doctors);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// --- 💳 BILLING & INVOICE ROUTES ---
+
+app.get('/api/invoices', async (req, res) => {
+    try {
+        const invoices = await Invoice.find().sort({ createdAt: -1 });
+        res.json(invoices);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.post('/api/invoices', async (req, res) => {
+    try {
+        const invoiceData = { ...req.body };
+        if (!invoiceData.subtotal && invoiceData.items) {
+            invoiceData.subtotal = invoiceData.items.reduce((sum, item) => sum + (item.total || 0), 0);
+        }
+
+        const newInvoice = new Invoice(invoiceData);
+        const saved = await newInvoice.save();
+        res.status(201).json(saved);
+    } catch (err) { 
+        console.error("Save Error:", err.message);
+        res.status(400).json({ message: err.message }); 
+    }
+});
+
+app.put('/api/invoices/:id/status', async (req, res) => {
+    try {
+        const { status } = req.body;
+        const updatedInvoice = await Invoice.findByIdAndUpdate(
+            req.params.id, 
+            { $set: { status: status } }, 
+            { new: true }
+        );
+        if (!updatedInvoice) return res.status(404).json({ message: "Invoice not found" });
+        res.json(updatedInvoice);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// --- 🛠️ MASTER SERVICE ROUTES (SETTINGS) ---
+
+app.get('/api/services', async (req, res) => {
+    try {
+        const services = await Service.find().sort({ name: 1 });
+        res.json(services);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.post('/api/services', async (req, res) => {
+    try {
+        const newService = new Service(req.body);
+        const saved = await newService.save();
+        res.status(201).json(saved);
+    } catch (err) { res.status(400).json({ message: err.message }); }
+});
+
+app.delete('/api/services/:id', async (req, res) => {
+    try {
+        await Service.findByIdAndDelete(req.params.id);
+        res.json({ success: true, message: "Service deleted successfully" });
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// --- 🏥 CLINIC SETTINGS ROUTES ---
+
+app.get('/api/settings', async (req, res) => {
+    try {
+        let settings = await Settings.findOne();
+        if (!settings) {
+            // Default settings if none exist
+            settings = await Settings.create({
+                clinicName: "Healthcare Clinic",
+                address: "Address Address",
+                contact: "95383638933",
+                adminName: "Mehak Zabeen",
+                email: "mehak@gmail.com"
+            });
+        }
+        res.json(settings);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.put('/api/settings', async (req, res) => {
+    try {
+        const updatedSettings = await Settings.findOneAndUpdate({}, req.body, { new: true, upsert: true });
+        res.json(updatedSettings);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
