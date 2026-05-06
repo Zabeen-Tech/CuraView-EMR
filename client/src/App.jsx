@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 
 // --- COMPONENTS ---
@@ -13,9 +13,10 @@ import NurseVitals from './nursevitals'; // Added Import for Nurse Vitals
  * Prevents unauthorized users from accessing specific dashboards.
  */
 const ProtectedRoute = ({ children, allowedRole }) => {
-  const token = localStorage.getItem('userId'); // Check if logged in
+  const token = localStorage.getItem('token'); // ✅ CHANGED: Use 'token' instead of 'userId'
   const role = localStorage.getItem('userRole'); // Check user role
 
+  // If no token, redirect to login
   if (!token) {
     return <Navigate to="/login" replace />;
   }
@@ -27,6 +28,7 @@ const ProtectedRoute = ({ children, allowedRole }) => {
 
   if (allowedRole && !isAllowed) {
     // If unauthorized, send them to their own dashboard
+    if (role === 'nurse') return <Navigate to="/nurse" replace />;
     return <Navigate to={`/${role}-dashboard`} replace />;
   }
 
@@ -34,10 +36,41 @@ const ProtectedRoute = ({ children, allowedRole }) => {
 };
 
 function App() {
+  // Add state to track auth status
+  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+  const [token, setToken] = useState(localStorage.getItem('token'));
+  const [role, setRole] = useState(localStorage.getItem('userRole'));
+
+  // Listen for storage changes (logout from other tabs)
+  useEffect(() => {
+    const handleStorageChange = () => {
+      setToken(localStorage.getItem('token'));
+      setRole(localStorage.getItem('userRole'));
+    };
+    
+    window.addEventListener('storage', handleStorageChange);
+    setIsCheckingAuth(false);
+    
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, []);
+
+  // Show loading while checking auth
+  if (isCheckingAuth) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-teal-50 to-blue-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-teal-600 mx-auto"></div>
+          <p className="mt-4 text-gray-600">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <Router>
       <Routes>
         {/* --- 🔐 AUTHENTICATION --- */}
+        {/* Login is always accessible - NO AUTO REDIRECT */}
         <Route path="/login" element={<Login />} />
 
         {/* --- 🏥 DASHBOARD ROUTES (Protected) --- */}
@@ -84,28 +117,14 @@ function App() {
 
         {/* --- 🚀 NAVIGATION LOGIC --- */}
         
-        {/* Root Redirect: Checks if already logged in, otherwise sends to login */}
-        <Route path="/" element={<LoginRedirect />} />
+        {/* Root Redirect: Always goes to login page first */}
+        <Route path="/" element={<Navigate to="/login" replace />} />
         
-        {/* Catch-all */}
+        {/* Catch-all - Any unknown route goes to login */}
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     </Router>
   );
 }
-
-/**
- * 🔄 Login Redirect Logic
- * If a user visits the root "/", check if they have a session and send them to their dashboard.
- */
-const LoginRedirect = () => {
-  const role = localStorage.getItem('userRole');
-  if (role) {
-    // Handling redirect for nurse role specifically
-    if (role === 'nurse') return <Navigate to="/nurse" replace />;
-    return <Navigate to={`/${role}-dashboard`} replace />;
-  }
-  return <Navigate to="/login" replace />;
-};
 
 export default App;

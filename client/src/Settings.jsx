@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Save, Plus, Trash2, Clock } from 'lucide-react';
 import axios from 'axios';
 
-const settings = () => {
+const Settings = () => {  // Changed from 'settings' to 'Settings' (React convention)
     // 1. State for Clinic Profile
     const [clinicInfo, setClinicInfo] = useState({
         adminName: '',
@@ -14,8 +14,9 @@ const settings = () => {
 
     // 2. State for Services List
     const [services, setServices] = useState([]);
+    const [errorMessage, setErrorMessage] = useState('');
 
-    // --- NEW: FETCH DATA FROM MONGODB ON LOAD ---
+    // --- FETCH DATA FROM MONGODB ON LOAD ---
     useEffect(() => {
         const fetchSettings = async () => {
             try {
@@ -28,18 +29,20 @@ const settings = () => {
                 setServices(servicesRes.data);
             } catch (err) {
                 console.error("Error loading settings:", err);
+                setErrorMessage("Failed to load settings. Please refresh the page.");
+                setTimeout(() => setErrorMessage(''), 3000);
             }
         };
         fetchSettings();
     }, []);
 
-    // 3. Logic: Handle Input Changes for Profile
+    // Handle Input Changes for Profile
     const handleProfileChange = (e) => {
         const { name, value } = e.target;
         setClinicInfo(prev => ({ ...prev, [name]: value }));
     };
 
-    // 4. Logic: Add New Service (Saves to DB immediately)
+    // Add New Service
     const addService = async () => {
         const newServiceTemplate = {
             name: 'New Service',
@@ -50,44 +53,83 @@ const settings = () => {
         try {
             const response = await axios.post("http://localhost:5000/api/services", newServiceTemplate);
             setServices([...services, response.data]);
+            setErrorMessage('');
         } catch (err) {
-            alert("Failed to add service to database.");
+            console.error("Add service error:", err);
+            setErrorMessage("Failed to add service to database.");
+            setTimeout(() => setErrorMessage(''), 3000);
         }
     };
 
-    // 5. Logic: Remove Service (Deletes from DB)
+    // Remove Service
     const removeService = async (id) => {
         try {
             await axios.delete(`http://localhost:5000/api/services/${id}`);
             setServices(services.filter(s => s._id !== id));
+            setErrorMessage('');
         } catch (err) {
-            alert("Could not delete service.");
+            console.error("Delete service error:", err);
+            setErrorMessage("Could not delete service.");
+            setTimeout(() => setErrorMessage(''), 3000);
         }
     };
 
-    // 6. Logic: Update existing service inline
-    const updateService = (id, field, value) => {
-        setServices(services.map(s => s._id === id ? { ...s, [field]: value } : s));
+    // Save individual service to database (SILENT - no popups)
+    const saveServiceToDB = async (id, updatedData) => {
+        try {
+            const response = await axios.put(`http://localhost:5000/api/services/${id}`, updatedData);
+            if (response.status >= 200 && response.status < 300) {
+                console.log(`✅ Service ${id} saved successfully`);
+                return true;
+            }
+        } catch (err) {
+            // Silently log error - no popup
+            console.warn(`⚠️ Save issue for ${id}:`, err.response?.status);
+            return false;
+        }
+        return false;
     };
 
-    // 7. Logic: Global Save for Clinic Info & All Services
+    // Handle service field change with auto-save
+    const handleServiceChange = async (id, field, value) => {
+        const currentService = services.find(s => s._id === id);
+        if (!currentService) return;
+        
+        const updatedService = {
+            ...currentService,
+            [field]: field === 'price' ? parseFloat(value) || 0 : value
+        };
+        
+        // Update local state immediately
+        setServices(services.map(s => s._id === id ? updatedService : s));
+        
+        // Save to database in background
+        await saveServiceToDB(id, updatedService);
+    };
+
+    // Global Save for Clinic Info
     const handleSave = async () => {
         try {
-            // Save Clinic Profile
             await axios.put("http://localhost:5000/api/settings", clinicInfo);
-            
-            // Optional: You could also loop and put/update services if you modified them inline
-            // For now, this saves the main profile info
-            alert("CuraView Settings Synced to MongoDB! ✅");
+            alert("Clinic Settings Saved Successfully! ✅");
+            setErrorMessage('');
         } catch (err) {
             console.error("Save error:", err);
-            alert("Error saving settings.");
+            setErrorMessage("Error saving clinic settings.");
+            setTimeout(() => setErrorMessage(''), 3000);
         }
     };
 
     return (
         <div className="p-6 bg-slate-50 min-h-screen font-sans">
             <h1 className="text-2xl font-bold text-teal-800 mb-6">CuraView EMR :: Settings</h1>
+
+            {/* Error Message Display */}
+            {errorMessage && (
+                <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded-xl text-sm">
+                    ⚠️ {errorMessage}
+                </div>
+            )}
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 
@@ -116,17 +158,49 @@ const settings = () => {
                                     className="w-full p-2 bg-slate-50 border rounded-lg text-sm focus:ring-2 focus:ring-teal-200 outline-none" 
                                     placeholder="Email" 
                                 />
-                                <input type="password" value="********" readOnly className="w-full p-2 bg-slate-100 border rounded-lg text-sm text-slate-400 cursor-not-allowed" />
-                                <button onClick={handleSave} className="bg-teal-500 text-white px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 hover:bg-teal-600 transition">
+                                <input 
+                                    type="password" 
+                                    value="********" 
+                                    readOnly 
+                                    className="w-full p-2 bg-slate-100 border rounded-lg text-sm text-slate-400 cursor-not-allowed" 
+                                />
+                                <button 
+                                    onClick={handleSave} 
+                                    className="bg-teal-500 text-white px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 hover:bg-teal-600 transition"
+                                >
                                     <Save size={16} /> Save Admin Changes
                                 </button>
                             </div>
                             <div className="space-y-4">
                                 <p className="font-bold text-slate-700 text-sm">Clinic Details</p>
-                                <input name="clinicName" type="text" value={clinicInfo.clinicName} onChange={handleProfileChange} className="w-full p-2 bg-slate-50 border rounded-lg text-sm" placeholder="Clinic Name" />
-                                <input name="address" type="text" value={clinicInfo.address} onChange={handleProfileChange} className="w-full p-2 bg-slate-50 border rounded-lg text-sm" placeholder="Clinic Address" />
-                                <input name="contact" type="text" value={clinicInfo.contact} onChange={handleProfileChange} className="w-full p-2 bg-slate-50 border rounded-lg text-sm" placeholder="Contact Number" />
-                                <button onClick={handleSave} className="bg-teal-500 text-white px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 hover:bg-teal-600 transition">
+                                <input 
+                                    name="clinicName" 
+                                    type="text" 
+                                    value={clinicInfo.clinicName} 
+                                    onChange={handleProfileChange} 
+                                    className="w-full p-2 bg-slate-50 border rounded-lg text-sm" 
+                                    placeholder="Clinic Name" 
+                                />
+                                <input 
+                                    name="address" 
+                                    type="text" 
+                                    value={clinicInfo.address} 
+                                    onChange={handleProfileChange} 
+                                    className="w-full p-2 bg-slate-50 border rounded-lg text-sm" 
+                                    placeholder="Clinic Address" 
+                                />
+                                <input 
+                                    name="contact" 
+                                    type="text" 
+                                    value={clinicInfo.contact} 
+                                    onChange={handleProfileChange} 
+                                    className="w-full p-2 bg-slate-50 border rounded-lg text-sm" 
+                                    placeholder="Contact Number" 
+                                />
+                                <button 
+                                    onClick={handleSave} 
+                                    className="bg-teal-500 text-white px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 hover:bg-teal-600 transition"
+                                >
                                     <Save size={16} /> Save Clinic Details
                                 </button>
                             </div>
@@ -151,21 +225,36 @@ const settings = () => {
                                 <table className="w-full text-xs text-center border-collapse">
                                     <thead>
                                         <tr className="text-slate-400">
-                                            <th>Weekly</th><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th><th>Sun</th>
+                                            <th>Weekly</th>
+                                            <th>Mon</th>
+                                            <th>Tue</th>
+                                            <th>Wed</th>
+                                            <th>Thu</th>
+                                            <th>Fri</th>
+                                            <th>Sat</th>
+                                            <th>Sun</th>
                                         </tr>
                                     </thead>
                                     <tbody className="text-slate-600">
                                         <tr className="border-t border-slate-200">
                                             <td className="py-2 font-bold">9 AM</td>
-                                            <td className="bg-teal-100 rounded m-1"></td><td className="bg-teal-100 rounded"></td>
-                                            <td className="bg-teal-100 rounded"></td><td className="bg-teal-100 rounded"></td>
-                                            <td className="bg-teal-100 rounded"></td><td>-</td><td>-</td>
+                                            <td className="bg-teal-100 rounded m-1">✓</td>
+                                            <td className="bg-teal-100 rounded">✓</td>
+                                            <td className="bg-teal-100 rounded">✓</td>
+                                            <td className="bg-teal-100 rounded">✓</td>
+                                            <td className="bg-teal-100 rounded">✓</td>
+                                            <td className="text-slate-300">-</td>
+                                            <td className="text-slate-300">-</td>
                                         </tr>
-                                        <tr>
+                                        <tr className="border-t border-slate-200">
                                             <td className="py-2 font-bold">1 PM</td>
-                                            <td className="bg-teal-200"></td><td className="bg-teal-200"></td>
-                                            <td className="bg-teal-200"></td><td className="bg-teal-200"></td>
-                                            <td className="bg-teal-200"></td><td>-</td><td>-</td>
+                                            <td className="bg-teal-200">✓</td>
+                                            <td className="bg-teal-200">✓</td>
+                                            <td className="bg-teal-200">✓</td>
+                                            <td className="bg-teal-200">✓</td>
+                                            <td className="bg-teal-200">✓</td>
+                                            <td className="text-slate-300">-</td>
+                                            <td className="text-slate-300">-</td>
                                         </tr>
                                     </tbody>
                                 </table>
@@ -193,18 +282,18 @@ const settings = () => {
                                     <div className="flex items-center gap-3 flex-1">
                                         <div className="w-2 h-2 bg-teal-400 rounded-full"></div>
                                         <input 
-                                            className="bg-transparent border-none text-sm font-medium text-slate-700 focus:outline-none w-full" 
+                                            className="bg-transparent border-none text-sm font-medium text-slate-700 focus:outline-none focus:ring-1 focus:ring-teal-300 rounded px-1 w-full" 
                                             value={s.name}
-                                            onChange={(e) => updateService(s._id, 'name', e.target.value)}
+                                            onChange={(e) => handleServiceChange(s._id, 'name', e.target.value)}
                                         />
                                     </div>
                                     <div className="flex items-center gap-2">
                                         <span className="text-teal-600 font-bold">₹</span>
                                         <input 
-                                            className="bg-transparent border-none text-sm font-bold text-teal-600 focus:outline-none w-16 text-right" 
+                                            className="bg-transparent border-none text-sm font-bold text-teal-600 focus:outline-none focus:ring-1 focus:ring-teal-300 rounded px-1 w-20 text-right" 
                                             type="number"
                                             value={s.price}
-                                            onChange={(e) => updateService(s._id, 'price', e.target.value)}
+                                            onChange={(e) => handleServiceChange(s._id, 'price', e.target.value)}
                                         />
                                         <button 
                                             onClick={() => removeService(s._id)}
@@ -216,9 +305,17 @@ const settings = () => {
                                 </div>
                             </div>
                         ))}
+                        {services.length === 0 && (
+                            <div className="text-center text-slate-400 py-8">
+                                No services added yet. Click + to add.
+                            </div>
+                        )}
                     </div>
                     
-                    <button onClick={addService} className="w-full py-3 bg-teal-50 text-teal-600 rounded-2xl font-bold border-2 border-dashed border-teal-200 hover:bg-teal-100 transition mt-6">
+                    <button 
+                        onClick={addService} 
+                        className="w-full py-3 bg-teal-50 text-teal-600 rounded-2xl font-bold border-2 border-dashed border-teal-200 hover:bg-teal-100 transition mt-6"
+                    >
                         + Add New Service
                     </button>
                 </div>
@@ -228,4 +325,4 @@ const settings = () => {
     );
 };
 
-export default settings;
+export default Settings;  // Changed from 'settings' to 'Settings'

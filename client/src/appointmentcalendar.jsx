@@ -1,25 +1,98 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
 
-const AppointmentCalendar = ({ doctors = [] }) => {
+const AppointmentCalendar = ({ doctors = [], onShiftsChange }) => {
   const timeSlots = [
     "09:00 AM", "10:00 AM", "11:00 AM", "12:00 PM", 
     "01:00 PM", "02:00 PM", "03:00 PM", "04:00 PM", "05:00 PM"
   ];
 
-  // State to track manual shift overrides
   const [shifts, setShifts] = useState({});
-  // State for the custom selection modal
+  const [loading, setLoading] = useState(true);
   const [statusModal, setStatusModal] = useState({ show: false, docId: null, docName: null, time: null });
+  
+  const today = new Date().toISOString().split('T')[0];
+
+  // Load shifts from database on mount
+  useEffect(() => {
+    loadShiftsFromDatabase();
+  }, [doctors]);
+
+  const loadShiftsFromDatabase = async () => {
+    setLoading(true);
+    try {
+      // Get all shifts for today's date
+      const res = await axios.get(`http://localhost:5000/api/shifts/date/${today}`);
+      const shiftsData = res.data;
+      
+      // Convert array to object for easy lookup
+      const shiftsObject = {};
+      shiftsData.forEach(shift => {
+        const key = `${shift.doctorId}-${shift.time}`;
+        shiftsObject[key] = shift.status;
+      });
+      
+      setShifts(shiftsObject);
+      
+      // Notify parent component
+      if (onShiftsChange) {
+        onShiftsChange(shiftsObject);
+      }
+    } catch (err) {
+      console.error("Error loading shifts:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const saveShiftToDatabase = async (doctorId, doctorName, time, status) => {
+    try {
+      await axios.post('http://localhost:5000/api/shifts', {
+        doctorId,
+        doctorName,
+        date: today,
+        time,
+        status
+      });
+      
+      // Update local state
+      const key = `${doctorId}-${time}`;
+      const newShifts = { ...shifts, [key]: status };
+      setShifts(newShifts);
+      
+      // Notify parent
+      if (onShiftsChange) {
+        onShiftsChange(newShifts);
+      }
+      
+      return true;
+    } catch (err) {
+      console.error("Error saving shift:", err);
+      alert("Failed to save shift. Please try again.");
+      return false;
+    }
+  };
 
   const handleOpenModal = (docId, docName, time) => {
     setStatusModal({ show: true, docId, docName, time });
   };
 
-  const updateStatus = (newStatus) => {
-    const key = `${statusModal.docId}-${statusModal.time}`;
-    setShifts({ ...shifts, [key]: newStatus });
+  const updateStatus = async (newStatus) => {
+    const { docId, docName, time } = statusModal;
+    await saveShiftToDatabase(docId, docName, time, newStatus);
     setStatusModal({ show: false, docId: null, docName: null, time: null });
   };
+
+  if (loading) {
+    return (
+      <div className="bg-white rounded-[2rem] p-8 shadow-sm border border-slate-100 min-h-[600px] flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-teal-500 mx-auto mb-4"></div>
+          <p className="text-slate-500">Loading shift data...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="bg-white rounded-[2rem] p-8 shadow-sm border border-slate-100 min-h-[600px] relative">
@@ -27,7 +100,7 @@ const AppointmentCalendar = ({ doctors = [] }) => {
         <div>
           <h2 className="text-2xl font-black text-slate-800">Staff Duty Roster</h2>
           <p className="text-xs text-teal-500 font-black uppercase tracking-widest mt-1">
-            Click any card to set shift status
+            Click any card to set shift status (saved to database)
           </p>
         </div>
         
@@ -63,9 +136,9 @@ const AppointmentCalendar = ({ doctors = [] }) => {
                     </div>
                   </div>
                 </td>
-
                 {timeSlots.map((time) => {
-                  const status = shifts[`${doc._id}-${time}`] || "OFF-DUTY";
+                  const key = `${doc._id}-${time}`;
+                  const status = shifts[key] || "OFF-DUTY";
                   const isOnDuty = status === "ON-DUTY";
                   return (
                     <td key={time} className="p-1">

@@ -22,6 +22,18 @@ const AdminDashboard = () => {
     appointmentTime: ''
   });
   
+  // State for doctor shifts
+  const [doctorShifts, setDoctorShifts] = useState({});
+  
+  // Edit/Delete Doctor States
+  const [showEditDoctorModal, setShowEditDoctorModal] = useState(false);
+  const [editingDoctor, setEditingDoctor] = useState(null);
+  const [editDoctorData, setEditDoctorData] = useState({
+    name: '',
+    email: '',
+    specialization: ''
+  });
+  
   const navigate = useNavigate();
   const roomsList = ["Room 1", "Room 2", "Room 3", "Room 4", "Room 5"];
 
@@ -41,36 +53,124 @@ const AdminDashboard = () => {
     name: '', email: '', password: '', role: 'doctor', specialization: ''
   });
 
+  // Load shifts from localStorage on mount (fallback)
+  useEffect(() => {
+    const savedShifts = localStorage.getItem('doctorShifts');
+    if (savedShifts) {
+      setDoctorShifts(JSON.parse(savedShifts));
+    }
+  }, []);
+
   useEffect(() => {
     fetchPatients();
     fetchDoctors();
-    fetchRooms(); 
     const interval = setInterval(() => {
         fetchPatients();
-        fetchRooms(); 
     }, 5000);
     return () => clearInterval(interval);
   }, []);
 
+  // Handle shift changes from AppointmentCalendar
+  const handleShiftsChange = (shifts) => {
+    setDoctorShifts(shifts);
+    localStorage.setItem('doctorShifts', JSON.stringify(shifts));
+  };
+
+  // Helper function to convert 12-hour time to 24-hour for comparison
+  const convertTime12To24 = (time12) => {
+    if (!time12) return '';
+    const time12Str = time12.toString().trim();
+    if (!time12Str.includes('AM') && !time12Str.includes('PM')) return time12Str;
+    
+    const [time, modifier] = time12Str.split(' ');
+    let [hours, minutes] = time.split(':');
+    hours = parseInt(hours);
+    if (modifier === 'PM' && hours !== 12) hours += 12;
+    if (modifier === 'AM' && hours === 12) hours = 0;
+    return `${hours.toString().padStart(2, '0')}:${minutes}`;
+  };
+
+  // ✅ FIXED: isSlotBooked - Shows booked slots as greyed out
+  const isSlotBooked = (doctorName, time12, date) => {
+    if (!doctorName || !time12 || !date) return false;
+    
+    const inputTime24 = convertTime12To24(time12);
+    
+    // Get ALL patients that are active for this doctor on this date
+    const allPatientsForDoctor = patients.filter(p => 
+      p.assignedDoctor === doctorName && 
+      p.appointmentDate === date && 
+      p.bookingStatus === 'Accepted' &&
+      p.status !== 'Discharged' &&
+      p.status !== 'Cancelled'
+    );
+    
+    // Check if any OTHER patient has this time slot (excluding current patient)
+    const isBookedByOther = allPatientsForDoctor.some(p => {
+      // Skip checking the current patient's own time slot
+      if (p._id === selectedPatient?._id) return false;
+      
+      let storedTime = p.appointmentTime;
+      if (!storedTime || storedTime === 'Not Scheduled' || storedTime === '') return false;
+      
+      let storedTime24 = storedTime;
+      if (storedTime.includes('AM') || storedTime.includes('PM')) {
+        storedTime24 = convertTime12To24(storedTime);
+      }
+      
+      return storedTime24 === inputTime24;
+    });
+    
+    return isBookedByOther;
+  };
+
+  // ✅ FIXED: getBookedSlotsForDoctor - Gets all booked slots excluding current patient
+  const getBookedSlotsForDoctor = (doctorName, date) => {
+    const bookedTimes = new Set();
+    
+    patients.forEach(p => {
+      if (p.assignedDoctor === doctorName && 
+          p.appointmentDate === date && 
+          p.bookingStatus === 'Accepted' &&
+          p.status !== 'Discharged' &&
+          p.status !== 'Cancelled' &&
+          p._id !== selectedPatient?._id &&  // ← EXCLUDE current patient
+          p.appointmentTime && 
+          p.appointmentTime !== 'Not Scheduled' &&
+          p.appointmentTime !== '') {
+        
+        let time = p.appointmentTime;
+        // Convert to consistent 12-hour format for display
+        if (time && !time.includes('AM') && !time.includes('PM')) {
+          const [hours, minutes] = time.split(':');
+          const hour = parseInt(hours);
+          const ampm = hour >= 12 ? 'PM' : 'AM';
+          const hour12 = hour % 12 || 12;
+          time = `${hour12}:${minutes} ${ampm}`;
+        }
+        bookedTimes.add(time);
+      }
+    });
+    
+    return Array.from(bookedTimes);
+  };
+
+  // ✅ UPDATED: fetchPatients with console log
   const fetchPatients = async () => {
     try {
       const res = await axios.get('http://localhost:5000/api/patients');
-      setPatients(res.data || []);
+      console.log("✅ Patients fetched from API:", res.data.length);
+      setPatients([...res.data]);
     } catch (err) { console.error("Fetch Patients Error", err); }
   };
 
+  // ✅ UPDATED: fetchDoctors with spread operator to force re-render
   const fetchDoctors = async () => {
     try {
       const res = await axios.get('http://localhost:5000/api/doctors');
-      setDoctors(res.data || []);
+      console.log("✅ Doctors fetched from API:", res.data);
+      setDoctors([...res.data]);
     } catch (err) { console.error("Fetch Doctors Error", err); }
-  };
-
-  const fetchRooms = async () => {
-    try {
-      const res = await axios.get('http://localhost:5000/api/rooms/status');
-      setRoomsStatus(res.data || []);
-    } catch (err) { console.error("Fetch Rooms Error", err); }
   };
 
   const suggestNextSlot = (doctorName) => {
@@ -86,8 +186,8 @@ const AdminDashboard = () => {
   };
 
   const suggestNextRoom = () => {
-    const occupied = roomsStatus.filter(r => r.isOccupied).map(r => r.room);
-    return roomsList.find(r => !occupied.includes(r)) || roomsList[0];
+    const usedRooms = patients.filter(p => p.roomNumber && p.roomNumber !== "Not Assigned").map(p => p.roomNumber);
+    return roomsList.find(r => !usedRooms.includes(r)) || roomsList[0];
   };
 
   const handleAddPatient = async (e) => {
@@ -99,11 +199,9 @@ const AdminDashboard = () => {
         p.appointmentDate === formData.appointmentDate
       ).length + 1;
 
-      const finalTime = formData.appointmentTime || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
       const dataToSend = {
         ...formData,
-        appointmentTime: finalTime,
+        appointmentTime: 'Not Scheduled',
         age: Number(formData.age),
         status: 'Waiting',
         bookingStatus: 'Accepted',
@@ -119,30 +217,90 @@ const AdminDashboard = () => {
     }
   };
 
+  // ✅ UPDATED: handleAddDoctor with proper refresh
   const handleAddDoctor = async (e) => {
     e.preventDefault();
     try {
-      await axios.post('http://localhost:5000/api/register', docFormData);
-      setShowDocModal(false);
+      console.log("Adding doctor:", docFormData);
+      const response = await axios.post('http://localhost:5000/api/register', docFormData);
+      console.log("Server response:", response.data);
+      
+      if (response.data.success) {
+        setShowDocModal(false);
+        await fetchDoctors();
+        setDocFormData({ name: '', email: '', password: '', role: 'doctor', specialization: '' });
+        alert("✅ Doctor added successfully!");
+      } else {
+        alert(response.data.message || "Error adding doctor");
+      }
+    } catch (err) { 
+      console.error("Add doctor error:", err);
+      alert(err.response?.data?.message || "Error adding doctor"); 
+    }
+  };
+
+  const handleEditDoctor = (doctor) => {
+    setEditingDoctor(doctor);
+    setEditDoctorData({
+      name: doctor.name,
+      email: doctor.email,
+      specialization: doctor.specialization
+    });
+    setShowEditDoctorModal(true);
+  };
+
+  const handleUpdateDoctor = async (e) => {
+    e.preventDefault();
+    try {
+      await axios.put(`http://localhost:5000/api/doctors/${editingDoctor._id}`, editDoctorData);
+      setShowEditDoctorModal(false);
+      setEditingDoctor(null);
       fetchDoctors();
-      setDocFormData({ name: '', email: '', password: '', role: 'doctor', specialization: '' });
-    } catch (err) { alert(err.response?.data?.message || "Error adding doctor"); }
+      alert(`✅ Doctor ${editDoctorData.name} updated successfully!`);
+    } catch (err) {
+      alert("Failed to update doctor: " + (err.response?.data?.message || err.message));
+    }
+  };
+
+  const handleDeleteDoctor = async (doctorId, doctorName) => {
+    if (window.confirm(`Are you sure you want to delete Dr. ${doctorName}? This action cannot be undone.`)) {
+      try {
+        await axios.delete(`http://localhost:5000/api/doctors/${doctorId}`);
+        fetchDoctors();
+        alert(`✅ Dr. ${doctorName} deleted successfully!`);
+      } catch (err) {
+        alert("Failed to delete doctor: " + (err.response?.data?.message || err.message));
+      }
+    }
   };
 
   const handleStatusChange = async (patientId, newStatus) => {
     try {
       const dbStatus = newStatus === 'In-Room' ? 'In-Consultation' : newStatus;
-      await axios.put(`http://localhost:5000/api/patients/${patientId}/status`, { status: dbStatus });
-      fetchPatients();
-      fetchRooms(); 
-    } catch (err) { alert("Status update failed"); }
+      
+      const currentPatient = patients.find(p => p._id === patientId);
+      
+      if ((currentPatient?.status === 'In-Consultation' && dbStatus === 'Waiting') ||
+          (currentPatient?.status === 'Waiting' && dbStatus === 'In-Consultation')) {
+        await axios.put(`http://localhost:5000/api/patients/${patientId}`, { 
+          status: dbStatus,
+          queuePosition: currentPatient.queuePosition
+        });
+      } else {
+        await axios.put(`http://localhost:5000/api/patients/${patientId}/status`, { status: dbStatus });
+      }
+      
+      fetchPatients(); 
+    } catch (err) { 
+      console.error("Status update failed", err);
+      alert("Status update failed"); 
+    }
   };
 
   const handleRoomChange = async (patientId, newRoom) => {
     try {
       await axios.put(`http://localhost:5000/api/patients/${patientId}`, { roomNumber: newRoom });
-      fetchPatients();
-      fetchRooms(); 
+      fetchPatients(); 
     } catch (err) { alert("Room assignment failed."); }
   };
 
@@ -165,37 +323,72 @@ const AdminDashboard = () => {
     return `${display}:${m} ${modifier}`;
   };
 
-  const handleOpenApproveModal = (patient) => {
+  const getSlotsForHour = (time12) => {
+    if (!time12) return [];
+    const [timePart, modifier] = time12.split(' ');
+    let hour = parseInt(timePart.split(':')[0]);
+    let hour24 = hour;
+    if (modifier === 'PM' && hour !== 12) hour24 = hour + 12;
+    if (modifier === 'AM' && hour === 12) hour24 = 0;
+    
+    const slots = [];
+    for (let minute of [0, 15, 30, 45]) {
+      let displayHour = hour24 > 12 ? hour24 - 12 : hour24;
+      if (displayHour === 0) displayHour = 12;
+      const displayAmpm = hour24 >= 12 ? 'PM' : 'AM';
+      const time12Str = `${displayHour}:${minute.toString().padStart(2, '0')} ${displayAmpm}`;
+      slots.push(time12Str);
+    }
+    return slots;
+  };
+
+  // ✅ FIXED: handleOpenApproveModal
+  const handleOpenApproveModal = async (patient) => {
     setSelectedPatient(patient);
+    
+    let existingTime24 = '';
+    if (patient.appointmentTime && patient.appointmentTime !== 'Not Scheduled' && patient.appointmentTime !== '') {
+      existingTime24 = convertTo24hr(patient.appointmentTime);
+    }
+    
     setApprovalData({
       roomNumber: patient.roomNumber !== "Not Assigned" ? patient.roomNumber : suggestNextRoom(),
-      appointmentTime: patient.appointmentTime && patient.appointmentTime !== 'Not Scheduled' 
-        ? convertTo24hr(patient.appointmentTime) 
-        : convertTo24hr(suggestNextSlot(patient.assignedDoctor))
+      appointmentTime: existingTime24
     });
     setShowApproveModal(true);
   };
 
   const submitFinalApproval = async (e) => {
     e.preventDefault();
+    
+    if (!approvalData.appointmentTime) {
+      alert("❌ Please select a time slot before confirming.");
+      return;
+    }
+    
+    const selectedTime12 = convertTo12hr(approvalData.appointmentTime);
+    const selectedDate = selectedPatient.appointmentDate;
+    
+    if (isSlotBooked(selectedPatient.assignedDoctor, selectedTime12, selectedDate)) {
+      alert(`❌ The time slot ${selectedTime12} is already BOOKED for Dr. ${selectedPatient.assignedDoctor}. Please select a different time.`);
+      return;
+    }
+    
     try {
-      const doctorName = selectedPatient.assignedDoctor;
-      const apptDate = selectedPatient.appointmentDate;
-      const acceptedToday = patients.filter(p => p.assignedDoctor === doctorName && p.bookingStatus === 'Accepted' && p.appointmentDate === apptDate).length;
-      const queuePos = selectedPatient.queuePosition || (acceptedToday + 1);
-
       await axios.put(`http://localhost:5000/api/patients/${selectedPatient._id}/respond-appointment`, {
         decision: 'Accepted', 
         adminNotes: "Confirmed via Heatmap",
-        queuePosition: queuePos,
+        queuePosition: selectedPatient.queuePosition,
         roomNumber: approvalData.roomNumber,
-        appointmentTime: convertTo12hr(approvalData.appointmentTime)
+        appointmentTime: selectedTime12
       });
       
       setShowApproveModal(false);
-      fetchPatients();
-      fetchRooms(); 
-    } catch (err) { alert("Approval failed"); }
+      fetchPatients(); 
+      alert(`✅ Appointment confirmed for ${selectedPatient.name} at ${selectedTime12} with Dr. ${selectedPatient.assignedDoctor}`);
+    } catch (err) { 
+      alert("Approval failed"); 
+    }
   };
 
   const handleAppointmentDecision = async (patientId, decision) => {
@@ -223,6 +416,25 @@ const AdminDashboard = () => {
     return name.includes(search) || phone.includes(search);
   });
 
+  const getRecentBookedSlots = (doctorName, date) => {
+    const bookedSlots = getBookedSlotsForDoctor(doctorName, date);
+    return bookedSlots.slice(0, 5);
+  };
+
+  const getSortableTime = (timeStr) => {
+    if (!timeStr || timeStr === 'Not Scheduled' || timeStr === '') return '99:99';
+    const match = timeStr.match(/(\d+):(\d+)\s*(AM|PM)/i);
+    if (match) {
+      let hour = parseInt(match[1]);
+      const minute = match[2];
+      const ampm = match[3].toUpperCase();
+      if (ampm === 'PM' && hour !== 12) hour += 12;
+      if (ampm === 'AM' && hour === 12) hour = 0;
+      return `${hour.toString().padStart(2, '0')}:${minute}`;
+    }
+    return '99:99';
+  };
+
   return (
     <div className="flex min-h-screen font-sans text-slate-900" style={{ backgroundColor: '#F0F9F6' }}>
       
@@ -241,7 +453,7 @@ const AdminDashboard = () => {
         </div>
 
         <nav className="space-y-2 grow">
-          {['Dashboard', 'Patient Records', 'Appointment Calendar', 'Billing & Reports', 'Settings'].map((item) => (
+          {['Dashboard', 'Patient Records', 'Shift Manager', 'Billing & Reports', 'Settings'].map((item) => (
             <button key={item} onClick={() => setActiveTab(item)}
               className={`w-full text-left flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition ${activeTab === item ? 'bg-teal-500 text-white shadow-lg' : 'hover:bg-slate-800'}`}>
               {item}
@@ -280,23 +492,26 @@ const AdminDashboard = () => {
               </div>
 
               <div className="grid grid-cols-5 gap-4 mb-8">
-                {roomsStatus.map((room, i) => (
-                    <div key={i} className={`p-4 rounded-2xl border-t-4 shadow-sm bg-white transition-all ${room.isOccupied ? 'border-red-500' : 'border-emerald-500'}`}>
-                        <div className="flex justify-between items-start mb-2">
-                            <span className="text-[10px] font-black text-slate-400 uppercase">{room.room}</span>
-                            <div className={`w-2 h-2 rounded-full ${room.isOccupied ? 'bg-red-500 animate-pulse' : 'bg-emerald-500'}`}></div>
+                {roomsList.map((room, i) => {
+                  const occupiedPatient = patients.find(p => p.roomNumber === room && p.status !== 'Discharged');
+                  return (
+                    <div key={i} className={`p-4 rounded-2xl border-t-4 shadow-sm bg-white transition-all ${occupiedPatient ? 'border-red-500' : 'border-emerald-500'}`}>
+                      <div className="flex justify-between items-start mb-2">
+                        <span className="text-[10px] font-black text-slate-400 uppercase">{room}</span>
+                        <div className={`w-2 h-2 rounded-full ${occupiedPatient ? 'bg-red-500 animate-pulse' : 'bg-emerald-500'}`}></div>
+                      </div>
+                      {occupiedPatient ? (
+                        <div>
+                          <p className="text-xs font-bold text-slate-800 truncate">Dr. {occupiedPatient.assignedDoctor}</p>
+                          <p className="text-[10px] text-slate-500 truncate">{occupiedPatient.name}</p>
+                          <p className="text-[9px] mt-2 bg-slate-100 w-fit px-2 py-0.5 rounded text-slate-600 font-bold">Since {occupiedPatient.appointmentTime || '--'}</p>
                         </div>
-                        {room.isOccupied ? (
-                            <div>
-                                <p className="text-xs font-bold text-slate-800 truncate">Dr. {room.doctor}</p>
-                                <p className="text-[10px] text-slate-500 truncate">{room.patientName}</p>
-                                <p className="text-[9px] mt-2 bg-slate-100 w-fit px-2 py-0.5 rounded text-slate-600 font-bold">Since {room.allottedTime}</p>
-                            </div>
-                        ) : (
-                            <p className="text-xs font-bold text-emerald-600 mt-4">AVAILABLE</p>
-                        )}
+                      ) : (
+                        <p className="text-xs font-bold text-emerald-600 mt-4">AVAILABLE</p>
+                      )}
                     </div>
-                ))}
+                  );
+                })}
               </div>
 
               <div className="grid grid-cols-12 gap-6">
@@ -324,7 +539,14 @@ const AdminDashboard = () => {
                     </div>
 
                     <div className="space-y-4">
-                       {filteredPatients.filter(p => p.status !== 'Discharged' && p.bookingStatus === 'Accepted').map(p => (
+                       {filteredPatients
+                         .filter(p => p.status !== 'Discharged' && p.bookingStatus === 'Accepted')
+                         .sort((a, b) => {
+                           const timeA = getSortableTime(a.appointmentTime);
+                           const timeB = getSortableTime(b.appointmentTime);
+                           return timeA.localeCompare(timeB);
+                         })
+                         .map(p => (
                         <div key={p._id} 
                              className={`flex items-center justify-between p-5 rounded-2xl border transition-all ${p.status === 'In-Consultation' ? 'border-l-8 border-emerald-500 bg-emerald-50/20' : 'bg-slate-50 border-slate-100'}`}>
                           <div className="flex items-center gap-4 w-[30%]">
@@ -342,12 +564,12 @@ const AdminDashboard = () => {
                             <button
                                 onClick={() => handleOpenApproveModal(p)}
                                 className={`text-[12px] font-black px-5 py-2 rounded-lg border shadow-sm min-w-[100px] text-center transition-all ${
-                                    p.appointmentTime && p.appointmentTime !== 'Not Scheduled' 
+                                    p.appointmentTime && p.appointmentTime !== 'Not Scheduled' && p.appointmentTime !== '' 
                                     ? 'text-teal-700 bg-white border-teal-200 hover:bg-teal-50' 
                                     : 'text-white bg-orange-500 border-orange-400 hover:bg-orange-600 uppercase tracking-widest'
                                 }`}
                             >
-                                {p.appointmentTime && p.appointmentTime !== 'Not Scheduled' ? p.appointmentTime : 'Set Time'}
+                                {p.appointmentTime && p.appointmentTime !== 'Not Scheduled' && p.appointmentTime !== '' ? p.appointmentTime : '--:--'}
                             </button>
                           </div>
 
@@ -372,18 +594,39 @@ const AdminDashboard = () => {
                 <section className="col-span-3 bg-white p-6 rounded-3xl shadow-sm border border-slate-100 h-fit">
                   <div className="flex justify-between items-center mb-6">
                     <h3 className="font-bold text-slate-800 text-sm">Clinic Staff</h3>
-                    <button onClick={() => setShowDocModal(true)} className="text-teal-600 font-bold text-xs">+ Add</button>
+                    <button onClick={() => setShowDocModal(true)} className="bg-teal-600 text-white px-3 py-1.5 rounded-lg text-[10px] font-bold hover:bg-teal-700 transition">+ Add</button>
                   </div>
-                  <div className="space-y-4">
+                  <div className="space-y-3 max-h-[400px] overflow-y-auto pr-1">
                     {doctors.map(doc => (
-                      <div key={doc._id} className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full bg-teal-50 flex items-center justify-center text-xs">🩺</div>
-                        <div>
-                          <p className="text-xs font-bold text-slate-700">{doc.name}</p>
-                          <p className="text-[9px] text-teal-500 font-bold uppercase">{doc.specialization}</p>
+                      <div key={doc._id} className="flex items-center justify-between gap-2 p-2 rounded-xl bg-slate-50 border border-slate-100">
+                        <div className="flex items-center gap-2 flex-1 min-w-0">
+                          <div className="w-8 h-8 rounded-full bg-teal-50 flex items-center justify-center text-sm flex-shrink-0">🩺</div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs font-bold text-slate-700 truncate">{doc.name}</p>
+                            <p className="text-[9px] text-teal-500 font-bold uppercase truncate">{doc.specialization}</p>
+                          </div>
+                        </div>
+                        <div className="flex gap-1 flex-shrink-0">
+                          <button 
+                            onClick={() => handleEditDoctor(doc)}
+                            className="p-1.5 rounded-lg bg-amber-50 text-amber-600 hover:bg-amber-100 transition"
+                            title="Edit Doctor"
+                          >
+                            ✏️
+                          </button>
+                          <button 
+                            onClick={() => handleDeleteDoctor(doc._id, doc.name)}
+                            className="p-1.5 rounded-lg bg-red-50 text-red-600 hover:bg-red-100 transition"
+                            title="Delete Doctor"
+                          >
+                            🗑️
+                          </button>
                         </div>
                       </div>
                     ))}
+                    {doctors.length === 0 && (
+                      <p className="text-xs text-slate-400 text-center py-4">No doctors added yet</p>
+                    )}
                   </div>
                 </section>
               </div>
@@ -392,14 +635,15 @@ const AdminDashboard = () => {
 
           {activeTab === 'Patient Records' && <PatientRecords />}
           
-          {activeTab === 'Appointment Calendar' && (
+          {activeTab === 'Shift Manager' && (
             <AppointmentCalendar 
               doctors={doctors} 
               patients={patients} 
+              onShiftsChange={handleShiftsChange}
               onSlotClick={(time, date) => { 
                 setFormData({ 
                   ...initialPatientState, 
-                  appointmentTime: time, 
+                  appointmentTime: 'Not Scheduled',
                   appointmentDate: date, 
                   bookingStatus: 'Pending' 
                 }); 
@@ -415,69 +659,253 @@ const AdminDashboard = () => {
 
       {showApproveModal && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
-          <div className="bg-white w-full max-w-sm rounded-[2rem] p-8 shadow-2xl border-4 border-teal-500">
-            <h2 className="text-xl font-black mb-2 text-slate-800">Assign Best Slot</h2>
-            <p className="text-xs text-slate-500 mb-6 font-semibold uppercase tracking-widest">Patient: {selectedPatient?.name}</p>
+          <div className="bg-white w-full max-w-md rounded-[2rem] p-6 shadow-2xl border-4 border-teal-500">
+            <h2 className="text-xl font-black mb-1 text-slate-800">Assign Best Slot</h2>
+            <p className="text-xs text-slate-500 mb-4 font-semibold">Patient: {selectedPatient?.name}</p>
             
-            <div className="bg-slate-50 p-4 rounded-2xl mb-6 border border-slate-100">
-              <p className="text-[10px] font-black text-slate-400 uppercase mb-3 tracking-widest">Live Availability Heatmap</p>
-              <div className="flex gap-1 overflow-x-auto pb-2">
-                {[0, 15, 30, 45].map(m => (
-                  <div key={m} className={`flex-shrink-0 w-12 h-12 rounded-lg flex items-center justify-center text-[9px] font-bold border transition ${m === 45 ? 'bg-teal-500 text-white animate-pulse border-teal-600' : 'bg-white text-slate-400 border-slate-100'}`}>
-                    10:{m === 0 ? '00' : m}
+            {(() => {
+              const currentHour12 = approvalData.appointmentTime ? convertTo12hr(approvalData.appointmentTime) : "09:00 AM";
+              const currentSlots = getSlotsForHour(currentHour12);
+              const bookedSlots = getRecentBookedSlots(selectedPatient?.assignedDoctor, selectedPatient?.appointmentDate);
+              const totalBookedCount = getBookedSlotsForDoctor(selectedPatient?.assignedDoctor, selectedPatient?.appointmentDate).length;
+              
+              return (
+                <div className="space-y-4">
+                  <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                    <p className="text-xs font-semibold text-slate-500 mb-2">Quick jump to hour:</p>
+                    <div className="flex flex-wrap gap-2">
+                      {["09:00 AM", "10:00 AM", "11:00 AM", "12:00 PM", "01:00 PM", "02:00 PM", "03:00 PM", "04:00 PM"].map(hour => {
+                        const isSelected = approvalData.appointmentTime && convertTo12hr(approvalData.appointmentTime).split(' ')[0] === hour.split(' ')[0];
+                        return (
+                          <button
+                            key={hour}
+                            type="button"
+                            onClick={() => {
+                              setApprovalData({...approvalData, appointmentTime: convertTo24hr(hour)});
+                            }}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-bold ${
+                              isSelected
+                                ? 'bg-teal-600 text-white'
+                                : 'bg-white text-slate-700 border border-teal-200 hover:bg-teal-50'
+                            }`}
+                          >
+                            {hour}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
-                ))}
-              </div>
-              <p className="text-[9px] text-teal-600 font-bold mt-2 italic">Next Free Slot: {suggestNextSlot(selectedPatient?.assignedDoctor)}</p>
-            </div>
+                  
+                  <div className="bg-teal-50 p-4 rounded-xl border border-teal-200">
+                    <p className="text-sm font-bold text-teal-700 mb-3 flex items-center gap-2">
+                      <span className="text-base">⚡</span> Slots for {currentHour12}
+                    </p>
+                    <div className="grid grid-cols-4 gap-2">
+                      {currentSlots.map((slot, idx) => {
+                        const isSelected = approvalData.appointmentTime === convertTo24hr(slot);
+                        const isBooked = isSlotBooked(selectedPatient?.assignedDoctor, slot, selectedPatient?.appointmentDate);
+                        
+                        return (
+                          <button
+                            key={idx}
+                            type="button"
+                            onClick={() => {
+                              if (!isBooked) {
+                                setApprovalData({...approvalData, appointmentTime: convertTo24hr(slot)});
+                              }
+                            }}
+                            disabled={isBooked}
+                            className={`py-2 px-3 rounded-lg text-sm font-bold transition-all ${
+                              isSelected
+                                ? 'bg-teal-600 text-white shadow-md ring-2 ring-teal-300'
+                                : isBooked
+                                ? 'bg-gray-200 text-gray-400 border border-gray-300 cursor-not-allowed line-through'
+                                : 'bg-white text-slate-700 border border-teal-300 hover:bg-teal-100 cursor-pointer'
+                            }`}
+                          >
+                            {slot}
+                            {isBooked && <span className="block text-[8px]">Booked</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  
+                  {bookedSlots.length > 0 && (
+                    <div className="bg-amber-50 p-3 rounded-xl border border-amber-200">
+                      <p className="text-xs font-bold text-amber-700 mb-2 flex items-center gap-1">
+                        <span>📋</span> Already Booked Today (Other Patients)
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {bookedSlots.map((slot, idx) => (
+                          <span key={idx} className="text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded-full line-through">
+                            {slot}
+                          </span>
+                        ))}
+                        {totalBookedCount > 5 && (
+                          <span className="text-xs text-amber-500">+{totalBookedCount - 5} more</span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  
+                  {approvalData.appointmentTime ? (
+                    <div className="bg-teal-50 p-3 rounded-xl border border-teal-200">
+                      <p className="text-xs text-teal-600 font-semibold">Selected Time:</p>
+                      <p className="text-base font-bold text-teal-800">{convertTo12hr(approvalData.appointmentTime)}</p>
+                    </div>
+                  ) : (
+                    <div className="bg-amber-50 p-3 rounded-xl border border-amber-200">
+                      <p className="text-xs text-amber-600 font-semibold">No time selected</p>
+                      <p className="text-sm text-amber-700">Please select a time slot above</p>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
-            <form onSubmit={submitFinalApproval} className="space-y-4">
+            <form onSubmit={submitFinalApproval} className="space-y-4 mt-4">
               <div>
-                <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Room Assignment</label>
+                <label className="text-xs font-black text-slate-400 uppercase ml-1">Room Assignment</label>
                 <select className="w-full p-3 mt-1 bg-slate-50 rounded-xl border border-slate-100 outline-none font-bold text-sm" value={approvalData.roomNumber} onChange={(e) => setApprovalData({...approvalData, roomNumber: e.target.value})} required>
                   {roomsList.map(room => <option key={room} value={room}>{room}</option>)}
                 </select>
               </div>
-              <div>
-                <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Confirm Time</label>
-                <input type="time" className="w-full p-3 mt-1 bg-slate-50 rounded-xl border border-teal-200 text-teal-600 outline-none font-black text-sm" value={approvalData.appointmentTime} onChange={(e) => setApprovalData({...approvalData, appointmentTime: e.target.value})} required />
-              </div>
-              <div className="flex gap-3 pt-4">
-                <button type="submit" className="flex-1 bg-teal-600 text-white py-4 rounded-2xl font-black text-xs hover:bg-teal-700 uppercase tracking-widest shadow-lg">Confirm & Queue</button>
-                <button type="button" onClick={() => setShowApproveModal(false)} className="px-4 py-3 text-slate-400 font-bold text-xs uppercase tracking-tighter">Cancel</button>
+              <div className="flex gap-3 pt-2">
+                <button type="submit" className="flex-1 bg-teal-600 text-white py-3 rounded-xl font-bold text-sm hover:bg-teal-700 uppercase tracking-wider shadow-lg">Confirm & Queue</button>
+                <button type="button" onClick={() => setShowApproveModal(false)} className="px-4 py-3 text-slate-400 font-bold text-sm uppercase tracking-tighter">Cancel</button>
               </div>
             </form>
           </div>
         </div>
       )}
 
+      {showEditDoctorModal && editingDoctor && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-[70] p-4">
+          <div className="bg-white w-full max-w-md rounded-[2rem] p-8 shadow-2xl border-4 border-amber-500">
+            <h2 className="text-xl font-black mb-2 text-slate-800">Edit Doctor</h2>
+            <p className="text-xs text-slate-500 mb-6 font-semibold uppercase tracking-widest">Update doctor information</p>
+            
+            <form onSubmit={handleUpdateDoctor} className="space-y-4">
+              <div>
+                <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Full Name</label>
+                <input 
+                  type="text" 
+                  required
+                  className="w-full p-3 mt-1 bg-slate-50 rounded-xl border border-slate-100 outline-none font-bold text-sm"
+                  value={editDoctorData.name}
+                  onChange={(e) => setEditDoctorData({...editDoctorData, name: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Email Address</label>
+                <input 
+                  type="email" 
+                  required
+                  className="w-full p-3 mt-1 bg-slate-50 rounded-xl border border-slate-100 outline-none font-bold text-sm"
+                  value={editDoctorData.email}
+                  onChange={(e) => setEditDoctorData({...editDoctorData, email: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Specialization</label>
+                <input 
+                  type="text" 
+                  required
+                  className="w-full p-3 mt-1 bg-slate-50 rounded-xl border border-slate-100 outline-none font-bold text-sm"
+                  value={editDoctorData.specialization}
+                  onChange={(e) => setEditDoctorData({...editDoctorData, specialization: e.target.value})}
+                />
+              </div>
+              <div className="flex gap-3 pt-4">
+                <button type="submit" className="flex-1 bg-amber-600 text-white py-3 rounded-xl font-bold text-sm hover:bg-amber-700 uppercase tracking-wider shadow-lg">Update Doctor</button>
+                <button type="button" onClick={() => setShowEditDoctorModal(false)} className="px-4 py-3 text-slate-400 font-bold text-sm uppercase tracking-tighter">Cancel</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ✅ UPDATED: Compact Quick Entry Modal */}
       {showRegModal && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white w-full max-md rounded-[2rem] p-8 shadow-2xl">
-            <h2 className="text-xl font-black mb-6 text-slate-800">New Patient Registration</h2>
-            <form onSubmit={handleAddPatient} className="space-y-4">
-              <input placeholder="Patient Name" required className="w-full p-3 bg-slate-50 rounded-xl border border-slate-100 outline-none" value={formData.name} onChange={(e) => setFormData({...formData, name: e.target.value})} />
-              <div className="flex gap-4">
-                <input placeholder="Phone" required className="flex-1 p-3 bg-slate-50 rounded-xl border border-slate-100 outline-none" value={formData.phone} onChange={(e) => setFormData({...formData, phone: e.target.value})} />
-                <input placeholder="Age" type="number" className="w-24 p-3 bg-slate-50 rounded-xl border border-slate-100 outline-none" value={formData.age} onChange={(e) => setFormData({...formData, age: e.target.value})} />
+          <div className="bg-white w-full max-w-lg rounded-2xl p-6 shadow-2xl">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-lg font-bold text-slate-800">New Patient Registration</h2>
+              <button onClick={() => setShowRegModal(false)} className="text-slate-400 hover:text-slate-600 text-xl">&times;</button>
+            </div>
+            
+            <form onSubmit={handleAddPatient} className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <input 
+                  placeholder="Patient Name" 
+                  required 
+                  className="w-full p-2.5 bg-slate-50 rounded-lg border border-slate-200 outline-none text-sm focus:ring-1 focus:ring-teal-500" 
+                  value={formData.name} 
+                  onChange={(e) => setFormData({...formData, name: e.target.value})} 
+                />
+                <input 
+                  placeholder="Phone" 
+                  required 
+                  className="w-full p-2.5 bg-slate-50 rounded-lg border border-slate-200 outline-none text-sm" 
+                  value={formData.phone} 
+                  onChange={(e) => setFormData({...formData, phone: e.target.value})} 
+                />
               </div>
-              <div className="flex gap-4">
-                <select className="w-1/2 p-3 bg-slate-50 rounded-xl border border-slate-100 outline-none" value={formData.gender} onChange={(e) => setFormData({...formData, gender: e.target.value})}>
-                  <option value="">Gender</option><option value="Male">Male</option><option value="Female">Female</option>
+              
+              <div className="grid grid-cols-3 gap-3">
+                <input 
+                  placeholder="Age" 
+                  type="number" 
+                  className="w-full p-2.5 bg-slate-50 rounded-lg border border-slate-200 outline-none text-sm" 
+                  value={formData.age} 
+                  onChange={(e) => setFormData({...formData, age: e.target.value})} 
+                />
+                <select 
+                  className="w-full p-2.5 bg-slate-50 rounded-lg border border-slate-200 outline-none text-sm" 
+                  value={formData.gender} 
+                  onChange={(e) => setFormData({...formData, gender: e.target.value})}
+                >
+                  <option value="">Gender</option>
+                  <option value="Male">Male</option>
+                  <option value="Female">Female</option>
                 </select>
-                <input type="date" className="w-1/2 p-3 bg-slate-50 rounded-xl border border-slate-100 outline-none" value={formData.appointmentDate} onChange={(e) => setFormData({...formData, appointmentDate: e.target.value})} />
+                <input 
+                  type="date" 
+                  className="w-full p-2.5 bg-slate-50 rounded-lg border border-slate-200 outline-none text-sm" 
+                  value={formData.appointmentDate} 
+                  onChange={(e) => setFormData({...formData, appointmentDate: e.target.value})} 
+                />
               </div>
-              <div className="flex gap-4">
-                <select className="flex-1 p-3 bg-slate-50 rounded-xl border border-slate-100 outline-none" value={formData.assignedDoctor} onChange={(e) => setFormData({...formData, assignedDoctor: e.target.value})} required>
+              
+              <div className="grid grid-cols-2 gap-3">
+                <select 
+                  className="w-full p-2.5 bg-slate-50 rounded-lg border border-slate-200 outline-none text-sm" 
+                  value={formData.assignedDoctor} 
+                  onChange={(e) => setFormData({...formData, assignedDoctor: e.target.value})} 
+                  required
+                >
                   <option value="">Assign Doctor</option>
                   {doctors.map(doc => <option key={doc._id} value={doc.name}>Dr. {doc.name}</option>)}
                 </select>
-                <input type="time" className="w-1/3 p-3 bg-slate-50 rounded-xl border border-slate-100 outline-none font-bold" value={formData.appointmentTime} onChange={(e) => setFormData({...formData, appointmentTime: e.target.value})} />
+                <input 
+                  type="time" 
+                  className="w-full p-2.5 bg-slate-50 rounded-lg border border-slate-200 outline-none text-sm font-bold" 
+                  value={formData.appointmentTime} 
+                  onChange={(e) => setFormData({...formData, appointmentTime: e.target.value})} 
+                />
               </div>
-              <textarea placeholder="Reason" className="w-full p-3 bg-slate-50 rounded-xl border border-slate-100 outline-none h-20" value={formData.condition} onChange={(e) => setFormData({...formData, condition: e.target.value})} />
+              
+              <textarea 
+                placeholder="Reason for visit..." 
+                className="w-full p-2.5 bg-slate-50 rounded-lg border border-slate-200 outline-none text-sm h-16 resize-none" 
+                value={formData.condition} 
+                onChange={(e) => setFormData({...formData, condition: e.target.value})} 
+              />
+              
               <div className="flex gap-3 pt-2">
-                <button type="submit" className="flex-1 bg-teal-600 text-white py-3 rounded-xl font-bold hover:bg-teal-700 uppercase tracking-widest">Register</button>
-                <button type="button" onClick={() => setShowRegModal(false)} className="px-6 py-3 text-slate-400 font-bold">CANCEL</button>
+                <button type="submit" className="flex-1 bg-teal-600 text-white py-2.5 rounded-lg font-semibold text-sm hover:bg-teal-700 transition">Register</button>
+                <button type="button" onClick={() => setShowRegModal(false)} className="flex-1 bg-slate-100 text-slate-600 py-2.5 rounded-lg font-semibold text-sm hover:bg-slate-200 transition">Cancel</button>
               </div>
             </form>
           </div>

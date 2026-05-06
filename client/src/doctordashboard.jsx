@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate, Link } from 'react-router-dom'; // Added Link
+import { useNavigate, Link } from 'react-router-dom';
 import axios from 'axios';
+import { io } from 'socket.io-client';
 
 const DoctorDashboard = () => {
   const navigate = useNavigate();
@@ -9,12 +10,52 @@ const DoctorDashboard = () => {
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedPatient, setSelectedPatient] = useState(null);
   const [showSoapModal, setShowSoapModal] = useState(false);
-  const [showHistoryOnly, setShowHistoryOnly] = useState(false); 
+  const [showHistoryOnly, setShowHistoryOnly] = useState(false);
+  const [socket, setSocket] = useState(null);
+  const [queuePositions, setQueuePositions] = useState({});
   
   const [clinicalNote, setClinicalNote] = useState("");
   const [prescription, setPrescription] = useState("");
 
   const doctorName = localStorage.getItem('userName') || "Mehak";
+
+  // Helper function to convert time to sortable format
+  const getSortableTime = (timeStr) => {
+    if (!timeStr || timeStr === 'Not Scheduled' || timeStr === '') return '99:99';
+    const match = timeStr.match(/(\d+):(\d+)\s*(AM|PM)/i);
+    if (match) {
+      let hour = parseInt(match[1]);
+      const minute = match[2];
+      const ampm = match[3].toUpperCase();
+      if (ampm === 'PM' && hour !== 12) hour += 12;
+      if (ampm === 'AM' && hour === 12) hour = 0;
+      return `${hour.toString().padStart(2, '0')}:${minute}`;
+    }
+    return '99:99';
+  };
+
+  // WebSocket connection for real-time updates
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    const newSocket = io('http://localhost:5000', {
+      auth: { token }
+    });
+
+    newSocket.on('connect', () => {
+      console.log('Doctor socket connected');
+      newSocket.emit('join-room', 'doctor');
+    });
+
+    newSocket.on('queue_updated', () => {
+      fetchAllData();
+    });
+
+    setSocket(newSocket);
+
+    return () => {
+      newSocket.close();
+    };
+  }, []);
 
   useEffect(() => {
     fetchAllData();
@@ -28,6 +69,22 @@ const DoctorDashboard = () => {
       const data = response.data || [];
       setAllPatients(data);
       
+      // Calculate local queue positions for this doctor's waiting patients based on time
+      const doctorPatients = data.filter(p => 
+        p.assignedDoctor === doctorName && 
+        p.status === 'Waiting'
+      ).sort((a, b) => {
+        const timeA = getSortableTime(a.appointmentTime);
+        const timeB = getSortableTime(b.appointmentTime);
+        return timeA.localeCompare(timeB);
+      });
+      
+      const positions = {};
+      doctorPatients.forEach((patient, index) => {
+        positions[patient._id] = index + 1;
+      });
+      setQueuePositions(positions);
+      
       if (selectedPatient) {
         const updated = data.find(p => p._id === selectedPatient._id);
         if (updated) setSelectedPatient(updated);
@@ -37,7 +94,28 @@ const DoctorDashboard = () => {
     }
   };
 
-  const schedulePatients = allPatients.filter(p => p.assignedDoctor === doctorName && p.status === 'In-Consultation');
+  // ✅ FIXED: In-Consultation patients sorted by appointment time
+  const schedulePatients = allPatients
+    .filter(p => p.assignedDoctor === doctorName && p.status === 'In-Consultation')
+    .sort((a, b) => {
+      const timeA = getSortableTime(a.appointmentTime);
+      const timeB = getSortableTime(b.appointmentTime);
+      return timeA.localeCompare(timeB);
+    });
+  
+  // ✅ FIXED: Waiting patients sorted by appointment time
+  const waitingPatients = allPatients
+    .filter(p => p.assignedDoctor === doctorName && p.status === 'Waiting')
+    .sort((a, b) => {
+      const timeA = getSortableTime(a.appointmentTime);
+      const timeB = getSortableTime(b.appointmentTime);
+      return timeA.localeCompare(timeB);
+    })
+    .map((p, index) => ({
+      ...p,
+      localPosition: index + 1
+    }));
+  
   const myPersonalHistory = allPatients.filter(p => p.assignedDoctor === doctorName);
   const globalRecords = allPatients.filter(p => 
     p.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
@@ -51,31 +129,38 @@ const DoctorDashboard = () => {
 
   const handleDischarge = async () => {
     if (!selectedPatient) return;
+    
+    if (!clinicalNote.trim() && !prescription.trim()) {
+      if (!window.confirm("No notes or prescription added. Are you sure you want to discharge without saving any record?")) {
+        return;
+      }
+    }
+    
     try {
-      await axios.put(`http://localhost:5000/api/patients/${selectedPatient._id}`, {
-        status: 'Discharged',
-        $push: { 
-          visitHistory: {
-            date: new Date().toLocaleDateString(),
-            notes: clinicalNote,
-            medications: prescription,
-            doctor: doctorName
-          }
-        }
+      const response = await axios.put(`http://localhost:5000/api/patients/${selectedPatient._id}/discharge`, {
+        notes: clinicalNote,
+        medications: prescription,
+        doctorName: doctorName
       });
-      setShowSoapModal(false);
-      setSelectedPatient(null);
-      setClinicalNote("");
-      setPrescription("");
-      fetchAllData();
+      
+      if (response.data.success) {
+        alert(`✅ Patient ${selectedPatient.name} discharged successfully!`);
+        setShowSoapModal(false);
+        setSelectedPatient(null);
+        setClinicalNote("");
+        setPrescription("");
+        fetchAllData();
+      } else {
+        alert("❌ Failed to discharge patient");
+      }
     } catch (err) {
       console.error("Discharge failed", err);
+      alert("❌ Failed to discharge patient: " + (err.response?.data?.message || "Please try again"));
     }
   };
 
   return (
     <div style={containerStyle}>
-      {/* SIDEBAR */}
       <aside style={sidebarStyle}>
         <div style={logoSection}><span style={logoText}>Doctor Portal</span></div>
         <div style={profileSection}>
@@ -91,13 +176,11 @@ const DoctorDashboard = () => {
           <div onClick={() => setActiveTab("Patient Records")} style={activeTab === "Patient Records" ? navItemActive : navItem}>Patient Records</div>
         </nav>
 
-        {/* NURSE ACCESS LINK */}
         <Link to="/nurse" style={nurseLinkBtn}>👩‍⚕️ Nurse Station</Link>
         
         <button onClick={() => {localStorage.clear(); navigate('/');}} style={sidebarLogoutBtn}>Sign Out</button>
       </aside>
 
-      {/* MAIN CONTENT */}
       <main style={mainContentStyle}>
         <header style={topHeaderStyle}>
           <h1 style={headerTitle}>Healthcare Clinic EMR System</h1>
@@ -108,7 +191,6 @@ const DoctorDashboard = () => {
 
         <h2 style={todayPulse}>Today's Pulse</h2>
 
-        {/* TAB 1: DASHBOARD VIEW */}
         {activeTab === "Dashboard" && (
           <div style={dashboardGrid}>
             <section style={columnAgenda}>
@@ -133,20 +215,50 @@ const DoctorDashboard = () => {
             <section style={columnWorklist}>
               <div style={sectionHeaderMatteMint}>Active Patient Worklist</div>
               <table style={workTable}>
-                <thead><tr style={tableHeaderRow}><th style={thStyle}>Patient Name</th><th style={thStyle}>Status</th><th style={thStyle}>Actions</th></tr></thead>
+                <thead>
+                  <tr style={tableHeaderRow}>
+                    <th style={thStyle}>Queue Pos</th>
+                    <th style={thStyle}>Patient Name</th>
+                    <th style={thStyle}>Status</th>
+                    <th style={thStyle}>Actions</th>
+                  </tr>
+                </thead>
                 <tbody>
-                  {schedulePatients.map(p => (
+                  {waitingPatients.map(p => (
                     <tr key={p._id} style={trStyle} onClick={() => setSelectedPatient(p)}>
+                      <td style={{...tdStyle, width: '70px'}}>
+                        <span style={queueNumberBadge}>#{p.localPosition}</span>
+                      </td>
                       <td style={tdStyle}><strong>{p.name}</strong></td>
-                      <td style={tdStyle}><span style={statusTagMatte}>In-Consultation</span></td>
+                      <td style={tdStyle}><span style={waitingStatusTag}>Waiting</span></td>
                       <td style={tdStyle}>
                         <div style={{display:'flex', gap:'8px'}}>
-                           <button style={outlineBtnSmall} onClick={(e) => { e.stopPropagation(); setShowSoapModal(true); }}>Write SOAP Note</button>
-                           <button style={historyBtnSmall} onClick={(e) => { e.stopPropagation(); openHistoryQuickly(p); }}>History</button>
+                          <button style={outlineBtnSmall} onClick={(e) => { e.stopPropagation(); setShowSoapModal(true); }}>Write SOAP Note</button>
+                          <button style={historyBtnSmall} onClick={(e) => { e.stopPropagation(); openHistoryQuickly(p); }}>History</button>
                         </div>
                       </td>
                     </tr>
                   ))}
+                  {schedulePatients.map(p => (
+                    <tr key={p._id} style={trStyle} onClick={() => setSelectedPatient(p)}>
+                      <td style={{...tdStyle, width: '70px'}}>
+                        <span style={activeQueueBadge}>●</span>
+                      </td>
+                      <td style={tdStyle}><strong>{p.name}</strong></td>
+                      <td style={tdStyle}><span style={statusTagMatte}>In-Consultation</span></td>
+                      <td style={tdStyle}>
+                        <div style={{display:'flex', gap:'8px'}}>
+                          <button style={outlineBtnSmall} onClick={(e) => { e.stopPropagation(); setShowSoapModal(true); }}>Write SOAP Note</button>
+                          <button style={historyBtnSmall} onClick={(e) => { e.stopPropagation(); openHistoryQuickly(p); }}>History</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {waitingPatients.length === 0 && schedulePatients.length === 0 && (
+                    <tr>
+                      <td colSpan="4" style={{textAlign:'center', padding:'40px', color:'#94A3B8'}}>No active patients in your queue</td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </section>
@@ -155,10 +267,20 @@ const DoctorDashboard = () => {
               <div style={sectionHeaderMatteMint}>Active Patient Focus</div>
               {selectedPatient ? (
                 <div style={focusCard}>
-                   <div style={{display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '20px'}}>
-                      <div style={focusAvatar}>{selectedPatient.name[0]}</div>
-                      <div style={{textAlign:'left'}}><div style={focusName}>{selectedPatient.name}</div><div style={{fontSize:'12px', color:'#64748B'}}>Basic Info</div></div>
-                   </div>
+                  <div style={{display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '20px'}}>
+                    <div style={focusAvatar}>{selectedPatient.name[0]}</div>
+                    <div style={{textAlign:'left'}}>
+                      <div style={focusName}>{selectedPatient.name}</div>
+                      <div style={{fontSize:'12px', color:'#64748B'}}>
+                        {selectedPatient.status === 'Waiting' && queuePositions[selectedPatient._id] && 
+                          `Queue Position: #${queuePositions[selectedPatient._id]}`
+                        }
+                        {selectedPatient.status === 'In-Consultation' && 
+                          `Currently in consultation`
+                        }
+                      </div>
+                    </div>
+                  </div>
                   <div style={vitalsGrid}>
                     <div style={vitalsBox}><span style={vitalsLabel}>WEIGHT</span><span style={vitalsValue}>{selectedPatient.vitals?.weight || "--"} kg</span></div>
                     <div style={vitalsBox}><span style={vitalsLabel}>HEIGHT</span><span style={vitalsValue}>{selectedPatient.vitals?.height || "--"} cm</span></div>
@@ -173,7 +295,6 @@ const DoctorDashboard = () => {
           </div>
         )}
 
-        {/* TABLES FOR OTHER TABS */}
         {(activeTab === "My Patients" || activeTab === "Patient Records") && (
           <section style={tableContainerCard}>
             <table style={workTable}>
@@ -202,30 +323,28 @@ const DoctorDashboard = () => {
         )}
       </main>
 
-      {/* QUICK HISTORY MODAL */}
       {showHistoryOnly && (
         <div style={modalOverlayStyle}>
           <div style={historyModalContainer}>
             <div style={historyModalHeader}>
-               <h3 style={{color: '#0D9488', margin: 0}}>Medical History: {selectedPatient?.name}</h3>
-               <button onClick={() => setShowHistoryOnly(false)} style={closeX}>✕</button>
+              <h3 style={{color: '#0D9488', margin: 0}}>Medical History: {selectedPatient?.name}</h3>
+              <button onClick={() => setShowHistoryOnly(false)} style={closeX}>✕</button>
             </div>
             <div style={historyModalBody}>
-               {selectedPatient?.visitHistory?.length > 0 ? (
-                 selectedPatient.visitHistory.map((v, i) => (
-                   <div key={i} style={historyCard}>
-                     <div style={historyDate}>{v.date} — Dr. {v.doctor}</div>
-                     <div style={historyNote}><strong>Note:</strong> {v.notes}</div>
-                     <div style={historyMeds}><strong>Rx:</strong> {v.medications}</div>
-                   </div>
-                 ))
-               ) : <p style={{textAlign:'center', color:'#94A3B8', padding: '20px'}}>No history records found.</p>}
+              {selectedPatient?.visitHistory?.length > 0 ? (
+                selectedPatient.visitHistory.map((v, i) => (
+                  <div key={i} style={historyCard}>
+                    <div style={historyDate}>{v.date} — Dr. {v.doctor}</div>
+                    <div style={historyNote}><strong>Note:</strong> {v.notes}</div>
+                    <div style={historyMeds}><strong>Rx:</strong> {v.medications}</div>
+                  </div>
+                ))
+              ) : <p style={{textAlign:'center', color:'#94A3B8', padding: '20px'}}>No history records found.</p>}
             </div>
           </div>
         </div>
       )}
 
-      {/* SOAP MODAL */}
       {showSoapModal && (
         <div style={modalOverlayStyle}>
           <div style={extendedModalContent}>
@@ -270,7 +389,6 @@ const navStyle = { flex: 1 };
 const navItem = { padding: '14px 15px', borderRadius: '8px', cursor: 'pointer', fontSize: '15px', color: '#E2E8F0', marginBottom: '5px' };
 const navItemActive = { ...navItem, backgroundColor: '#334155', borderLeft: '5px solid #0D9488', fontWeight: 'bold' };
 
-// Nurse Link Style
 const nurseLinkBtn = { 
   textDecoration: 'none', 
   color: '#0D9488', 
@@ -307,12 +425,32 @@ const thStyle = { padding: '15px', fontSize: '13px', color: '#64748B' };
 const trStyle = { borderBottom: '1px solid #F8FAFC', cursor: 'pointer' };
 const tdStyle = { padding: '15px', fontSize: '14px' };
 const statusTagMatte = { backgroundColor: '#F0FDF4', color: '#166534', padding: '5px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold' };
+const waitingStatusTag = { backgroundColor: '#FEF3C7', color: '#92400E', padding: '5px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold' };
 const outlineBtnSmall = { border: '1px solid #CBD5E1', color: '#1E293B', padding: '6px 12px', borderRadius: '6px', cursor: 'pointer', backgroundColor: 'white', fontSize: '12px' };
 const historyBtnSmall = { border: '1px solid #0D9488', color: '#0D9488', padding: '6px 12px', borderRadius: '6px', cursor: 'pointer', backgroundColor: 'white', fontSize: '12px' };
 const columnFocus = { backgroundColor: 'white', borderRadius: '15px', border: '1px solid #E2E8F0' };
 const focusCard = { padding: '20px' };
 const focusAvatar = { width: '50px', height: '50px', borderRadius: '50%', backgroundColor: '#F1F5F9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' };
 const focusName = { fontWeight: 'bold', fontSize: '16px' };
+
+const queueNumberBadge = {
+  backgroundColor: '#0D9488',
+  color: 'white',
+  padding: '4px 10px',
+  borderRadius: '20px',
+  fontSize: '12px',
+  fontWeight: 'bold',
+  display: 'inline-block',
+  textAlign: 'center'
+};
+
+const activeQueueBadge = {
+  color: '#10B981',
+  fontSize: '16px',
+  fontWeight: 'bold',
+  display: 'inline-block',
+  textAlign: 'center'
+};
 
 const vitalsGrid = { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '20px' };
 const vitalsBox = { backgroundColor: '#F8FAFC', padding: '10px', borderRadius: '8px', border: '1px solid #E2E8F0', display: 'flex', alignItems: 'baseline', gap: '8px' };
